@@ -1,0 +1,126 @@
+#!/bin/sh
+
+# vim: set ts=4:
+set -eu
+
+readonly HOOK_NAME='secureboot'
+
+# Defaults
+cmdline=
+signing_dir='/var/lib/sbctl'
+signing_disabled=no
+microcode=
+splash_image='/dev/null'
+output_dir='/boot/efi/Chimera'
+output_name='Linux-{flavor}.efi'
+backup_old=yes
+skip_flavors=
+efistub_file='/usr/lib/systemd/boot/efi/linux{march}.efi.stub'
+
+die() {
+	printf "$HOOK_NAME: %s\n" "$2" >&2
+	exit "$1"
+}
+
+_genkeys() {
+	sbctl create-keys --database-path="$signing_dir"
+	sed \
+		-e "s|{data_path}|$signing_dir|g" \
+		/usr/share/secureboot/sbctl.conf.in > "$signing_dir"/sbctl.conf
+
+	echo "==> REMEMBER TO ENROLL KEYS with \`sbctl enroll-keys -m --config=$signing_dir/sbctl.conf\`" >&2
+}
+
+if [ -z "${__SKIP_SB_CHECK:-}" ]; then
+	linux-version list | linux-version sort --reverse | while IFS= read -r KVER; do
+		__SKIP_SB_CHECK=yes /bin/sh "$0" "$KVER" "$KVER"
+	done
+	exit 0
+fi
+
+if [ $# -lt 2 ]; then
+	echo "Usage: $0 <flavor> <new-version>" >&2
+	exit 1
+fi
+
+readonly FLAVOR="$1"
+readonly NEW_VERSION="$2"
+case "$(cat /etc/apk/arch)" in
+	aarch64) readonly MARCH="aa64";;
+	arm*)    readonly MARCH="arm";;
+	riscv64) readonly MARCH="riscv64";;
+	x86)     readonly MARCH="ia32";;
+	x86_64)  readonly MARCH="x64";;
+esac
+
+# Hook triggered for the kernel removal, nothing to do here.
+[ "$NEW_VERSION" ] || exit 0
+
+. "/etc/default/$HOOK_NAME"
+
+[ "$skip_flavors" ] && for flavor in $skip_flavors; do
+	[ "$flavor" = "$FLAVOR" ] \
+		&& die 0 "==> skipping UEFI image creation for $FLAVOR kernel"
+done
+
+[ "$cmdline" ] \
+	|| die 0 "cmdline is not specified in /etc/default/$HOOK_NAME.conf, skipping hook!"
+
+if [ "$signing_disabled" != yes ]; then
+	[ -r "$signing_dir"/keys ] \
+		|| _genkeys "$signing_dir"
+fi
+
+vmlinuz="/boot/vmlinuz-$FLAVOR"
+initrd="/boot/initrd.img-$FLAVOR"
+output_name=$(echo "$output_name" \
+	| sed "s/{flavor}/$FLAVOR/; s/{version}/$NEW_VERSION/")
+output="$output_dir/$output_name"
+efistub_file=$(echo "$efistub_file" | sed "s/{march}/$MARCH/")
+
+[ "$microcode" ] || for path in /boot/intel-ucode.img /boot/amd-ucode.img; do
+	[ -f "$path" ] && microcode="$path"
+done
+
+[ -r "$initrd" ] \
+	|| die 0 "Initrd not found for $vmlinuz, skipping hook!"
+
+tmpdir=$(mktemp -dt "$HOOK_NAME.XXXXXX")
+trap "rm -f '$tmpdir'/*; rmdir '$tmpdir'" EXIT HUP INT TERM
+
+if [ "$backup_old" = yes ] && [ -f "$output" ]; then
+	cp -a "$output" "$output.bak"
+fi
+
+echo "==> $HOOK_NAME: creating UEFI Unified Kernel Image with $vmlinuz"
+ukify build \
+	--cmdline "$cmdline" \
+	--uname "$FLAVOR" \
+	--splash "$splash_image" \
+	--stub "$efistub_file" \
+	-o "$tmpdir"/unsigned.efi \
+	--linux "$vmlinuz" \
+	--microcode $microcode \
+	--initrd "$initrd"
+
+mkdir -p "$output_dir"
+
+if [ "$signing_disabled" = yes ]; then
+	echo "==> $HOOK_NAME: writing *unsigned* UEFI image to $output (signing is disabled!)"
+	mv "$tmpdir"/unsigned.efi "$output"
+else
+	echo "==> $HOOK_NAME: signing UEFI image and writing to $output"
+	rm -f "$output"
+	sbctl sign \
+		--config "$signing_dir"/sbctl.conf \
+		--output "$output" \
+		"$tmpdir"/unsigned.efi
+fi
+
+# Just a simple sanity check.
+dir="$(readlink -f "$output_dir")"
+while [ "$dir" ]; do
+	mount -t vfat | grep -Fq " on $dir type vfat " && exit 0
+	dir=${dir%/*}
+done
+die 0 "WARNING: $output_dir is not on UEFI System Partition as it should be!"

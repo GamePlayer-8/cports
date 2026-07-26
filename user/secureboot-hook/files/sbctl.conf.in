@@ -1,0 +1,18 @@
+---
+keydir: {data_path}/keys
+guid: {data_path}/GUID
+files_db: {data_path}/files.json
+landlock: true
+keys:
+    pk:
+    privkey: {data_path}/keys/PK/PK.key
+    pubkey: {data_path}/keys/PK/PK.pem
+    type: file
+    kek:
+    privkey: {data_path}/keys/KEK/KEK.key
+    pubkey: {data_path}/keys/KEK/KEK.pem
+    type: file
+    db:
+    privkey: {data_path}/keys/db/db.key
+    pubkey: {data_path}/keys/db/db.pem
+    type: file
