@@ -16,3 +16,6 @@ bootstrap.*
 # custom configs
 .gram/
 .nvim.lua
+
+# Misc
+/out
